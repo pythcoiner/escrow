@@ -8,6 +8,7 @@ mod mempool_space_api;
 mod nostr;
 pub mod signing_device;
 mod wallet;
+mod views;
 
 use crate::bitcoin::BitcoinClient;
 use crate::client::ClientFn;

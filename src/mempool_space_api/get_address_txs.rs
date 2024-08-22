@@ -111,6 +111,7 @@ mod tests {
     use std::str::FromStr;
 
     // virgin address
+    #[allow(unused)]
     const SAMPLE_VIRGIN_JSON: &str = r#"
         []
     "#;
@@ -232,6 +233,7 @@ mod tests {
         }
     "#;
 
+    #[allow(unused)]
     const UNSPENT: &str = r#"
         [
     {

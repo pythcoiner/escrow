@@ -3,24 +3,18 @@ use crate::contract::{Contract, ContractId, ContractMessage};
 use crate::hot_signer::TaprootHotSigner;
 use crate::mempool_space_api::get_address_utxo::UtxoInfo;
 use crate::nostr::{generate_npriv, key_from_npriv, NostrListener, NostrMessage};
+use crate::views;
+use crate::views::chat::{ChatEntry, User};
 use crate::wallet::{create_transaction, policy_to_taproot};
 use async_channel::{Receiver, SendError, Sender};
 use bip39::Mnemonic;
 use bitcoin_amount::Amount;
-use iced::alignment::Horizontal;
 use iced::keyboard::key::Named;
 use iced::keyboard::{Key, Modifiers};
-use iced::widget::container::Appearance;
 use iced::widget::qr_code::Data;
 use iced::widget::text_editor::{Action, Content, Edit};
-use iced::widget::{
-    container, focus_next, focus_previous, row, scrollable, Button, Column, Container, PickList,
-    QRCode, Row, Space, Text, TextEditor, TextInput,
-};
-use iced::{
-    executor, keyboard, theme, Alignment, Application, Border, Color, Element, Event, Length,
-    Renderer, Subscription, Theme,
-};
+use iced::widget::{focus_next, focus_previous};
+use iced::{executor, keyboard, Application, Element, Event, Subscription, Theme};
 use iced_runtime::Command;
 use miniscript::bitcoin::hashes::Hash;
 use miniscript::bitcoin::{Address, Network, Transaction};
@@ -43,7 +37,7 @@ pub struct Identity {
     seed: Option<Mnemonic>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContractState {
     None,
     Offered,
@@ -57,20 +51,6 @@ pub enum ContractState {
     InDispute,
 }
 
-#[allow(unused)]
-pub enum User {
-    Me,
-    Other(String),
-    Escrow(String),
-}
-
-#[allow(unused)]
-pub struct ChatEntry {
-    user: User,
-    text: String,
-}
-
-#[allow(unused)]
 #[derive(Debug, Clone, Copy)]
 pub enum TimelockUnit {
     Day,
@@ -127,11 +107,11 @@ pub struct Flags {
     pub network: Network,
 }
 
-#[allow(unused)]
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum Side {
     Buyer,
     Seller,
+    #[allow(unused)]
     Escrow,
     None,
 }
@@ -466,8 +446,6 @@ impl Escrow {
         self.save_contract();
     }
 
-    fn refund(&self) {}
-
     fn datadir() -> PathBuf {
         #[cfg(target_os = "linux")]
         let dir = {
@@ -568,7 +546,7 @@ impl Escrow {
         contract_file.write_all(yaml_str.as_bytes()).unwrap();
     }
 
-    fn is_contract_valid(&self) -> bool {
+    pub fn is_contract_valid(&self) -> bool {
         if let Ok(amount) = f64::from_str(&self.total_amount) {
             if amount > MIN_AMOUNT {
                 return true;
@@ -633,6 +611,70 @@ impl Escrow {
 
             _ => {}
         }
+    }
+
+    pub fn npub(&self) -> &str {
+        &self.npub
+    }
+
+    pub fn npriv(&self) -> &str {
+        &self.npriv
+    }
+
+    pub fn npriv_error(&self) -> Option<String> {
+        self.npriv_error.clone()
+    }
+
+    pub fn peer_npub_str(&self) -> &str {
+        &self.peer_npub_str
+    }
+
+    pub fn side(&self) -> Side {
+        self.side
+    }
+
+    pub fn contract_state(&self) -> ContractState {
+        self.contract_state
+    }
+
+    pub fn withdraw_address(&self) -> &str {
+        &self.withdraw_address
+    }
+
+    pub fn total_amount(&self) -> &str {
+        &self.total_amount
+    }
+
+    pub fn deposit_amount(&self) -> &str {
+        &self.deposit_amount
+    }
+
+    pub fn timelock(&self) -> &str {
+        &self.timelock
+    }
+
+    pub fn timelock_unit(&self) -> TimelockUnit {
+        self.timelock_unit
+    }
+
+    pub fn contract_text(&self) -> &Content {
+        &self.contract_text
+    }
+
+    pub fn deposit_address(&self) -> &Option<String> {
+        &self.deposit_address
+    }
+
+    pub fn qr(&self) -> &Option<Data> {
+        &self.qr
+    }
+
+    pub fn chat_history(&self) -> &Vec<ChatEntry> {
+        &self.chat_history
+    }
+
+    pub fn chat_input(&self) -> &str {
+        &self.chat_input
     }
 }
 
@@ -921,13 +963,13 @@ impl Application for Escrow {
 
     fn view(&self) -> Element<'_, Message> {
         let content = match self.step {
-            Step::NostrConnect => connect_view(self),
-            Step::PeerConnect => connect_peer_view(self),
+            Step::NostrConnect => views::connect::connect_view(self),
+            Step::PeerConnect => views::connect::connect_peer_view(self),
             // Step::FundWallet => fund_wallet_view(self),
-            Step::Main => main_view(self),
+            Step::Main => views::main_view(self),
         };
 
-        main_frame(content).into()
+        views::main_frame(content).into()
     }
 
     fn theme(&self) -> Self::Theme {
@@ -1020,450 +1062,4 @@ enum Step {
     PeerConnect,
     // FundWallet,
     Main,
-}
-
-fn connect_view(escrow: &Escrow) -> Element<Message> {
-    let content = container(
-        Column::new()
-            .push(
-                Row::new()
-                    .push(Space::with_width(Length::Fill))
-                    .push(
-                        TextInput::new("Npriv", &escrow.npriv)
-                            .on_input(Message::Npriv)
-                            .width(600.0),
-                    )
-                    .push(Space::with_width(Length::Fill)),
-            )
-            .push(Text::new(if let Some(e) = &escrow.npriv_error {
-                e
-            } else {
-                ""
-            }))
-            .push(Space::with_height(40.0))
-            .push(
-                Row::new()
-                    .push(Space::with_width(Length::Fill))
-                    .push(
-                        Button::new(Text::new("Create").horizontal_alignment(Horizontal::Center))
-                            .on_press(Message::CreateNpriv)
-                            .width(130.0),
-                    )
-                    .push(Space::with_width(30.0))
-                    .push(
-                        Button::new(Text::new("Connect").horizontal_alignment(Horizontal::Center))
-                            .on_press(Message::ConnectNpriv)
-                            .width(130.0),
-                    )
-                    .push(Space::with_width(Length::Fill)),
-            )
-            .width(600),
-    );
-
-    content.into()
-}
-
-fn connect_peer_view(escrow: &Escrow) -> Element<Message> {
-    let content = container(
-        Column::new()
-            .push(
-                Row::new()
-                    .push(Space::with_width(Length::Fill))
-                    .push(
-                        TextInput::new("", &escrow.npub)
-                            .on_input(Message::Npub)
-                            .width(600.0),
-                    )
-                    .push(Space::with_width(Length::Fill)),
-            )
-            .push(Space::with_height(5))
-            .push(
-                Row::new()
-                    .push(Space::with_width(Length::Fill))
-                    .push(
-                        TextInput::new("", &escrow.peer_npub_str)
-                            .on_input(Message::PeerNpub)
-                            .width(600.0),
-                    )
-                    .push(Space::with_width(Length::Fill)),
-            )
-            .push(Space::with_height(40.0))
-            .push(
-                Row::new()
-                    .push(Space::with_width(Length::Fill))
-                    .push(
-                        Button::new(Text::new("Receive").horizontal_alignment(Horizontal::Center))
-                            .on_press(Message::ReceiveMode)
-                            .width(130.0),
-                    )
-                    .push(Space::with_width(30.0))
-                    .push(
-                        Button::new(Text::new("Send").horizontal_alignment(Horizontal::Center))
-                            .on_press(Message::SendMode)
-                            .width(130.0),
-                    )
-                    .push(Space::with_width(Length::Fill)),
-            )
-            .width(600),
-    );
-
-    content.into()
-}
-
-fn qr_code(escrow: &Escrow) -> QRCode<Theme> {
-    escrow
-        .qr
-        .as_ref()
-        .map(|data| QRCode::new(data).cell_size(8))
-        .expect("Adress QR should not fail")
-}
-
-fn main_view(escrow: &Escrow) -> Element<Message> {
-    let content = container(
-        row!(
-            contract_column(escrow).width(400.0).height(900.0),
-            Space::with_width(30.0),
-            main_chat(escrow).width(400.0).height(900.0),
-        )
-        .align_items(Alignment::Center),
-    );
-
-    content.into()
-}
-
-fn main_chat(escrow: &Escrow) -> Column<Message> {
-    let mut chat = Column::new().padding(15);
-
-    for entry in &escrow.chat_history {
-        chat = chat.push(chat_line(entry));
-        chat = chat.push(Space::with_height(3.0));
-    }
-
-    let chat_box = Container::new(scrollable(chat).height(580))
-        .style(chat_box)
-        .padding(5);
-
-    Column::new()
-        .push(
-            Row::new()
-                .push(Space::with_width(Length::Fill))
-                .push(Text::new("Chat").size(25.0))
-                .push(Space::with_width(Length::Fill)),
-        )
-        .push(Space::with_height(20.0))
-        .push(chat_box)
-        .push(Space::with_height(5.0))
-        .push(
-            Row::new()
-                .push(
-                    TextInput::new("send message to peer...", &escrow.chat_input)
-                        .on_input(Message::ChatMsg)
-                        .on_submit(Message::SendChat)
-                        .width(Length::Fill),
-                )
-                .push(Space::with_width(10.0))
-                .push(Button::new(Text::new("Send")).on_press(Message::SendChat)),
-        )
-}
-
-fn contract_column(escrow: &Escrow) -> Column<Message> {
-    let side = &escrow.side;
-    let step = &escrow.contract_state;
-    log::info!("side={:?}, contract_state={:?}", side, step);
-
-    let contract_title = match (side, step) {
-        (Side::Seller, ContractState::None) => "Prepare escrow contract!",
-        (Side::Seller, ContractState::Offered) => "Waiting your peer accept contract...",
-        (Side::Seller, ContractState::Accepted) => "Contract accepted!",
-        (Side::Seller, ContractState::Funded) => "Contract funded! (unconfirmed)",
-        (Side::Seller, ContractState::Locked) => "Funds locked in escrow",
-        (Side::Seller, ContractState::Unlocked) => "Funds unlocked!",
-        (Side::Buyer, ContractState::None) => "Waiting for seller to create contract...",
-        (Side::Buyer, ContractState::Offered) => "Seller want to offer you this contract:",
-        (Side::Buyer, ContractState::Accepted) => "Fund contract!",
-        (Side::Buyer, ContractState::Funded) => "Contract funded (unconfirmed)...",
-        (Side::Buyer, ContractState::Locked) => "Funds locked in escrow!",
-        (Side::Buyer, ContractState::Unlocked) => "Payment finalized",
-        _ => "",
-    };
-
-    let send = escrow.is_contract_valid();
-
-    let buttons = match (side, step) {
-        (Side::Seller, ContractState::None) => btn_row(
-            vec![(
-                "Send contract!",
-                if send {
-                    Some(Message::OfferContract)
-                } else {
-                    None
-                },
-            )],
-            false,
-        ),
-        (Side::Seller, ContractState::Locked) => {
-            btn_row(vec![("Dispute", Some(Message::Dispute))], false)
-        }
-        (Side::Seller, ContractState::Unlocked) => {
-            let addr_valid = Address::from_str(&escrow.withdraw_address).is_ok();
-            let withdraw_action = if addr_valid {
-                Some(Message::Withdraw)
-            } else {
-                None
-            };
-            btn_row(vec![("Withdraw", withdraw_action)], false)
-        }
-        (Side::Buyer, ContractState::Offered) => btn_row(
-            vec![
-                ("Refuse", Some(Message::RefuseContract)),
-                ("Accept and pay", Some(Message::AcceptContract)),
-            ],
-            false,
-        ),
-        (Side::Buyer, ContractState::Accepted) => {
-            btn_row(vec![("PSBT Broadcast", Some(Message::TxBroadcasted))], true)
-        }
-        (Side::Buyer, ContractState::Funded) => {
-            btn_row(vec![("Tx mined", Some(Message::TxMined))], true)
-        }
-        (Side::Buyer, ContractState::Locked) => {
-            btn_row(
-                vec![("Unlock", Some(Message::UnlockFunds)), ("Dispute", None)], // Some(Message::Dispute)
-                false,
-            )
-        }
-        _ => {
-            row!(Space::with_height(25))
-        }
-    };
-
-    let content = match (side, step) {
-        (Side::Seller, ContractState::Offered) | (Side::Buyer, ContractState::None) => None,
-        (Side::Buyer, ContractState::Accepted) => Some(fund_contract(escrow)),
-        _ => Some(contract(escrow)),
-    };
-
-    let display_withdraw =
-        escrow.side == Side::Seller && escrow.contract_state == ContractState::Unlocked;
-    let withdraw_input = if display_withdraw {
-        Some(
-            Row::new().push(
-                TextInput::new("Enter an address to withdraw to", &escrow.withdraw_address)
-                    .on_input(Message::WithdrawAddress),
-            ),
-        )
-    } else {
-        None
-    };
-
-    Column::new()
-        .push(Space::with_height(Length::Fill))
-        .push(Space::with_height(50))
-        .push(
-            Row::new()
-                .push(Space::with_width(Length::Fill))
-                .push(Text::new(contract_title).size(30))
-                .push(Space::with_width(Length::Fill)),
-        )
-        .push(Space::with_height(40.0))
-        .push_maybe(content)
-        .push(Space::with_height(30.0))
-        .push_maybe(withdraw_input)
-        .push_maybe(if display_withdraw {
-            Some(Space::with_height(30))
-        } else {
-            None
-        })
-        .push(buttons)
-        .push(Space::with_height(Length::Fill))
-}
-
-fn contract(escrow: &Escrow) -> Column<Message> {
-    let units = [
-        TimelockUnit::Day.to_string(),
-        TimelockUnit::Hour.to_string(),
-        TimelockUnit::Block.to_string(),
-    ];
-
-    let (amount_placeholder, deposit_placeholder, timelock_placeholder) =
-        if escrow.side == Side::Seller && escrow.contract_state == ContractState::None {
-            ("0.04 BTC", "0.01 BTC", "65535")
-        } else {
-            ("", "", "")
-        };
-
-    Column::new()
-        .push(
-            Row::new()
-                .push(Text::new("Total amount to receive"))
-                .push(Space::with_width(Length::Fill))
-                .push(
-                    TextInput::new(amount_placeholder, &escrow.total_amount)
-                        .on_input(Message::Amount)
-                        .width(200.0),
-                ),
-        )
-        .push(Space::with_height(30.0))
-        .push(
-            Row::new()
-                .push(Text::new("Deposit"))
-                .push(Space::with_width(Length::Fill))
-                .push(
-                    TextInput::new(deposit_placeholder, &escrow.deposit_amount)
-                        .on_input(Message::Deposit)
-                        .width(200.0),
-                ),
-        )
-        .push(Space::with_height(30.0))
-        .push(
-            Row::new()
-                .push(Text::new("Timelock"))
-                .push(Space::with_width(Length::Fill))
-                .push(
-                    TextInput::new(timelock_placeholder, &escrow.timelock)
-                        .on_input(Message::Timelock)
-                        .width(110.0),
-                )
-                .push(Space::with_width(10.0))
-                .push(
-                    PickList::new(
-                        units.clone(),
-                        Some(escrow.timelock_unit.to_string()),
-                        Message::TimelockUnit,
-                    )
-                    .width(80.0),
-                ),
-        )
-        .push(Space::with_height(30.0))
-        .push(
-            TextEditor::new(&escrow.contract_text)
-                .on_action(Message::ContractDetail)
-                .height(250),
-        )
-}
-
-#[allow(unused)]
-fn message_box(text: &str) -> Column<Message> {
-    Column::new().push(
-        Row::new()
-            .push(Space::with_width(Length::Fill))
-            .push(
-                container(Text::new(text))
-                    .width(400)
-                    .height(400)
-                    .style(chat_box),
-            )
-            .push(Space::with_width(Length::Fill)),
-    )
-}
-
-fn fund_contract(escrow: &Escrow) -> Column<Message> {
-    Column::new()
-        .push(
-            Row::new()
-                .push(Space::with_width(Length::Fill))
-                .push(
-                    container(qr_code(escrow))
-                        .width(Length::Shrink)
-                        .height(Length::Shrink)
-                        .padding(25)
-                        .style(chat_box),
-                )
-                .push(Space::with_width(Length::Fill)),
-        )
-        .push(Space::with_height(10))
-        .push(TextInput::new("", escrow.deposit_address.as_ref().unwrap()).on_input(Message::Nop))
-}
-
-fn main_frame(element: Element<Message>) -> Column<Message> {
-    let output: Column<Message, Theme, Renderer> = Column::new()
-        .push(Space::with_height(Length::Fill))
-        .push(
-            Row::new()
-                .push(Space::with_width(Length::Fill))
-                .push(container(element))
-                .push(Space::with_width(Length::Fill)),
-        )
-        .push(Space::with_height(Length::Fill))
-        .padding(20.0);
-
-    output
-}
-
-fn chat_line(entry: &ChatEntry) -> Container<Message> {
-    let me = match &entry.user {
-        User::Me => Some(Space::with_width(Length::Fill)),
-        _ => None,
-    };
-    let other = match &entry.user {
-        User::Me => None,
-        _ => Some(Space::with_width(Length::Fill)),
-    };
-
-    let chat_style = if me.is_some() {
-        chat_entry_me
-    } else {
-        chat_entry_other
-    };
-
-    let row = Row::new()
-        .push_maybe(me)
-        .push(
-            Container::new(Text::new(&entry.text))
-                .padding(5.0)
-                .style(chat_style),
-        )
-        .push_maybe(other);
-
-    Container::new(row)
-}
-
-pub fn chat_box(theme: &Theme) -> Appearance {
-    let palette = theme.extended_palette();
-
-    Appearance {
-        background: Some(palette.background.weak.color.into()),
-        border: Border::with_radius(10),
-        ..Appearance::default()
-    }
-}
-
-pub fn chat_entry_me(_: &Theme) -> Appearance {
-    let red = Color::from_rgb8(250, 120, 120);
-    let mut a = Appearance::default().with_background(red);
-    a.border.radius = 4.into();
-    a.text_color = Some(Color::BLACK);
-    a
-}
-
-pub fn chat_entry_other(_: &Theme) -> Appearance {
-    let blue = Color::from_rgb8(120, 235, 250);
-    let mut a = Appearance::default().with_background(blue);
-    a.border.radius = 4.into();
-    a.text_color = Some(Color::BLACK);
-    a
-}
-
-pub fn btn_row(labels: Vec<(&str, Option<Message>)>, debug: bool) -> Row<Message> {
-    let mut btns = labels
-        .into_iter()
-        .map(|(label, msg)| {
-            let mut btn: Button<Message> = Button::new(label).on_press_maybe(msg);
-            if debug {
-                btn = btn.style(theme::Button::Destructive);
-            }
-            btn
-        })
-        .collect::<Vec<_>>()
-        .into_iter();
-
-    let mut row = Row::new()
-        .push(Space::with_width(Length::Fill))
-        .push(btns.next().expect("At least one button"));
-
-    for btn in btns {
-        row = row.push(Space::with_width(30)).push(btn);
-    }
-
-    row.push(Space::with_width(Length::Fill))
 }

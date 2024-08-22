@@ -53,21 +53,21 @@ pub fn derive_xpub(
     }
 }
 
-pub fn xpub_to_concrete(
-    fingerprint: Fingerprint,
-    mut xpub: Xpub,
-    xpub_path: &DerivationPath,
-) -> DescriptorPublicKey {
-    xpub.parent_fingerprint = fingerprint;
-    let key = DescriptorXKey {
-        origin: Some((fingerprint, xpub_path.clone())),
-        xkey: xpub,
-        derivation_path: DerivationPath::default(),
-        wildcard: Wildcard::None,
-    };
-
-    DescriptorPublicKey::XPub(key)
-}
+// pub fn xpub_to_concrete(
+//     fingerprint: Fingerprint,
+//     mut xpub: Xpub,
+//     xpub_path: &DerivationPath,
+// ) -> DescriptorPublicKey {
+//     xpub.parent_fingerprint = fingerprint;
+//     let key = DescriptorXKey {
+//         origin: Some((fingerprint, xpub_path.clone())),
+//         xkey: xpub,
+//         derivation_path: DerivationPath::default(),
+//         wildcard: Wildcard::None,
+//     };
+//
+//     DescriptorPublicKey::XPub(key)
+// }
 
 pub fn encode_descriptor_pubkey(key: &DescriptorPublicKey) -> [u8; 78] {
     if let DescriptorPublicKey::XPub(k) = key {

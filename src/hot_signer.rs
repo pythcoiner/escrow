@@ -12,6 +12,7 @@ use std::str::FromStr;
 
 #[derive(Debug)]
 pub struct TaprootHotSigner {
+    #[allow(unused)]
     key: PrivateKey,
     master_xpriv: Xpriv,
     fingerprint: bip32::Fingerprint,
@@ -152,6 +153,6 @@ mod tests {
             Fingerprint::from_str("63114451").unwrap()
         );
 
-        let origin_xpub = signer.xpub_at(vec![ChildNumber::from_hardened_idx(48).unwrap()].into());
+        let _origin_xpub = signer.xpub_at(vec![ChildNumber::from_hardened_idx(48).unwrap()].into());
     }
 }
