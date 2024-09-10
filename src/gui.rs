@@ -49,6 +49,19 @@ pub enum ContractState {
     DisputeAccepted,
 }
 
+impl ContractState {
+    pub fn is_some(&self) -> bool {
+        match self {
+            ContractState::None => false,
+            _ => true,
+        }
+    }
+
+    pub fn is_none(&self) -> bool {
+        !self.is_some()
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub enum TimelockUnit {
     Day,
@@ -304,7 +317,8 @@ impl Escrow {
         log::debug!("Escrow.contract_accepted()");
         // TODO: double check id & peer
         if self.contract_state != ContractState::Offered {
-            panic!("Escrow.contract_accepted() Wrong contract state");
+            log::warn!("Escrow.contract_accepted() Wrong contract state");
+            return;
         }
 
         if !contract.check_buyer_signature() {
@@ -843,6 +857,9 @@ impl Application for Escrow {
     type Flags = Flags;
 
     fn new(args: Self::Flags) -> (Self, Command<Self::Message>) {
+        log::info!("Escrow::new()");
+
+        // TODO: if identity defined try to load from nostr
         let history = vec![ChatEntry {
             user: User::Other("Default".to_string()),
             text: "Send a message to your peer".to_string(),
@@ -854,10 +871,10 @@ impl Application for Escrow {
         ) -> Option<TaprootHotSigner> {
             if let Some(identity) = identity {
                 if let Some(mnemonic) = identity.seed {
-                    return Some(TaprootHotSigner::new_from_mnemonics(
-                        network,
-                        &mnemonic.to_string(),
-                    ));
+                    let signer =
+                        TaprootHotSigner::new_from_mnemonics(network, &mnemonic.to_string());
+                    log::info!("Escrow::new() load hotsigner {:?}", signer);
+                    return Some(signer);
                 }
             }
             Some(TaprootHotSigner::new(network))
@@ -875,6 +892,10 @@ impl Application for Escrow {
 
         let nostr_keys = nostr_keys_from_identity(args.identity);
 
+        if let Some(key) = nostr_keys.as_ref() {
+            log::info!("Escrow::new() load nostr keys {:?}", &key.public_key());
+        }
+
         let (contract, side) = if let Some((contract, side)) = &args.contract {
             (Some(contract.clone()), *side)
         } else {
@@ -890,6 +911,10 @@ impl Application for Escrow {
         } else {
             None
         };
+
+        if let Some(peer) = peer_npub.as_ref() {
+            log::info!("Escrow::new() load peer {:?}", &peer);
+        }
 
         let (step, contract_state) = {
             match (&nostr_keys, &peer_npub, &contract) {
@@ -922,6 +947,18 @@ impl Application for Escrow {
                 _ => (Step::NostrConnect, ContractState::None),
             }
         };
+
+        if let Some(contract) = contract.as_ref() {
+            log::info!(
+                "Escrow::new() load contract {:?} as {:?}",
+                contract.get_id().unwrap(),
+                side
+            );
+        }
+
+        if contract_state.is_some() {
+            log::info!("Escrow::new() contract at state {:?}", &contract_state);
+        }
 
         let mut escrow = Escrow {
             step,
@@ -960,6 +997,10 @@ impl Application for Escrow {
 
         if let Some(keys) = &escrow.nostr_keys {
             escrow.send_nostr_msg(NostrMessage::Connect(keys.clone()));
+        }
+
+        if let Some(peer) = escrow.peer_npub {
+            escrow.send_nostr_msg(NostrMessage::Peer(peer));
         }
 
         // start watching address

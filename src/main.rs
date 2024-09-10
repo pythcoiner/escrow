@@ -46,8 +46,8 @@ async fn main() {
     bitcoin.start();
 
     let args = NostrArgs {
-        // relays: vec!["ws://127.0.0.1:8080"],
-        relays: vec!["wss://relay.damus.io"],
+        relays: vec!["ws://127.0.0.1:8080"],
+        // relays: vec!["wss://relay.damus.io"],
     };
 
     let nostr = NostrClient::new(nostr_sender, nostr_receiver, args);

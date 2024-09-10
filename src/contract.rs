@@ -411,7 +411,6 @@ impl Contract {
     pub fn get_amount(&self) -> Amount {
         self.total_amount
     }
-    // self.total_amount = (contract.get_amount().into_inner() as f64 / 100_000_000.0).to_string();
 
     pub fn get_amount_str(&self) -> String {
         (self.total_amount.into_inner() as f64 / SATOSHIS_PER_BITCOIN).to_string()

@@ -8,9 +8,9 @@ use miniscript::bitcoin::{self, psbt, Psbt};
 use miniscript::bitcoin::{bip32, secp256k1, Network, PrivateKey};
 use miniscript::descriptor::DescriptorXKey;
 use miniscript::DescriptorPublicKey;
+use std::fmt::Debug;
 use std::str::FromStr;
 
-#[derive(Debug)]
 pub struct TaprootHotSigner {
     #[allow(unused)]
     key: PrivateKey,
@@ -18,6 +18,14 @@ pub struct TaprootHotSigner {
     fingerprint: bip32::Fingerprint,
     secp: secp256k1::Secp256k1<All>,
     mnemonic: Option<Mnemonic>,
+}
+
+impl Debug for TaprootHotSigner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TaprootHotSigner")
+            .field("fingerprint", &self.fingerprint)
+            .finish()
+    }
 }
 
 #[allow(unused)]
