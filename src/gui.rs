@@ -3,9 +3,8 @@ use crate::contract::{Contract, ContractId, ContractMessage};
 use crate::hot_signer::TaprootHotSigner;
 use crate::mempool_space_api::get_address_utxo::UtxoInfo;
 use crate::nostr::{generate_npriv, key_from_npriv, NostrListener, NostrMessage};
-use crate::views;
 use crate::views::chat::{ChatEntry, User};
-use crate::wallet::{create_transaction, policy_to_taproot};
+use crate::{config, views};
 use async_channel::{Receiver, SendError, Sender};
 use bip39::Mnemonic;
 use bitcoin_amount::Amount;
@@ -31,10 +30,10 @@ use std::sync::Arc;
 
 const MIN_AMOUNT: f64 = 0.01;
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Identity {
-    npriv: Option<String>,
-    seed: Option<Mnemonic>,
+    pub npriv: Option<String>,
+    pub seed: Option<Mnemonic>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -106,6 +105,8 @@ pub struct Flags {
     pub bitcoin_receiver: Receiver<BitcoinMessage>,
     pub network: Network,
 }
+    pub identity: Option<Identity>,
+    pub contract: Option<(Contract, Side)>,
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum Side {
@@ -115,6 +116,19 @@ pub enum Side {
     Escrow,
     None,
 }
+impl FromStr for Side {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(match s.to_string().to_lowercase().as_str() {
+            "buyer" => Self::Buyer,
+            "seller" => Self::Seller,
+            "escrow" => Self::Escrow,
+            _ => Self::None,
+        })
+    }
+}
+
 
 impl Display for Side {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
@@ -129,8 +143,6 @@ impl Display for Side {
 
 #[allow(unused)]
 pub struct Escrow {
-    min_width: f32,
-    min_height: f32,
     step: Step,
     npriv: String,
     npriv_error: Option<String>,
@@ -446,104 +458,34 @@ impl Escrow {
         self.save_contract();
     }
 
-    fn datadir() -> PathBuf {
-        #[cfg(target_os = "linux")]
-        let dir = {
-            let mut dir = dirs::home_dir().unwrap();
-            dir.push(".escrow");
-            dir
-        };
-
-        #[cfg(not(target_os = "linux"))]
-        let dir = {
-            let mut dir = dirs::config_dir().unwrap();
-            dir.push("Escrow");
-            dir
-        };
-
-        Self::maybe_create_dir(&dir);
-
-        dir
-    }
-
-    fn maybe_create_dir(dir: &PathBuf) {
-        if !dir.exists() {
-            #[cfg(unix)]
-            {
-                use std::fs::DirBuilder;
-                use std::os::unix::fs::DirBuilderExt;
-
-                let mut builder = DirBuilder::new();
-                builder.mode(0o700).recursive(true).create(dir).unwrap();
-            }
-
-            #[cfg(not(unix))]
-            std::fs::create_dir_all(dir).unwrap();
-        }
-    }
-
     fn nostr_fingerprint(&self) -> String {
         self.nostr_keys.as_ref().unwrap().public_key().to_string()[..10].to_string()
     }
 
-    fn maybe_save_identity(&self) {
-        let mut dir = Self::datadir();
-        dir.push(self.nostr_fingerprint());
-
-        Self::maybe_create_dir(&dir);
-
-        dir.push("identity");
-
-        if !dir.exists() {
-            let mut identity_file = File::create(dir).unwrap();
-
-            let identity = Identity {
-                npriv: Some(
-                    self.nostr_keys
-                        .as_ref()
-                        .unwrap()
-                        .secret_key()
-                        .unwrap()
-                        .to_bech32()
-                        .unwrap(),
-                ),
-                seed: self.hot_signer.as_ref().unwrap().mnemonic(),
-            };
-
-            let yaml_str = serde_yaml::to_string(&identity).unwrap();
-
-            identity_file.write_all(yaml_str.as_bytes()).unwrap();
+    fn identity(&self) -> Identity {
+        Identity {
+            npriv: Some(
+                self.nostr_keys
+                    .as_ref()
+                    .unwrap()
+                    .secret_key()
+                    .unwrap()
+                    .to_bech32()
+                    .unwrap(),
+            ),
+            seed: self.hot_signer.as_ref().unwrap().mnemonic(),
         }
     }
 
     fn save_contract(&self) {
-        self.maybe_save_identity();
-
-        let contract_name = self
-            .contract
-            .as_ref()
-            .unwrap()
-            .hash(crate::contract::ContractState::Accepted)
-            .unwrap()
-            .to_string()[..20]
-            .to_string();
-
-        let mut dir = Self::datadir();
-        dir.push(self.nostr_fingerprint());
-        dir.push("contracts");
-        dir.push(self.side.to_string());
-
-        Self::maybe_create_dir(&dir);
-
-        dir.push(contract_name);
-
-        let mut contract_file = File::create(dir).unwrap();
-
-        let contract = self.contract.clone().unwrap();
-
-        let yaml_str = serde_yaml::to_string(&contract).unwrap();
-
-        contract_file.write_all(yaml_str.as_bytes()).unwrap();
+        if let Some(contract) = &self.contract {
+            config::maybe_save_contract(
+                self.nostr_fingerprint(),
+                self.identity(),
+                self.side(),
+                contract.clone(),
+            );
+        }
     }
 
     pub fn is_contract_valid(&self) -> bool {
@@ -690,15 +632,86 @@ impl Application for Escrow {
             text: "Send a message to your peer".to_string(),
         }];
 
-        let signer = TaprootHotSigner::new(args.network);
+        fn hot_signer_from_identity(
+            identity: Option<Identity>,
+            network: Network,
+        ) -> Option<TaprootHotSigner> {
+            if let Some(identity) = identity {
+                if let Some(mnemonic) = identity.seed {
+                    return Some(TaprootHotSigner::new_from_mnemonics(
+                        network,
+                        &mnemonic.to_string(),
+                    ));
+                }
+            }
+            Some(TaprootHotSigner::new(network))
+        }
+        let hot_signer = hot_signer_from_identity(args.identity.clone(), args.network);
 
-        let escrow = Escrow {
-            min_width: 950.0,
-            min_height: 700.0,
-            step: Step::NostrConnect,
+        fn nostr_keys_from_identity(identity: Option<Identity>) -> Option<Keys> {
+            if let Some(identity) = identity {
+                if let Some(npriv) = identity.npriv {
+                    return Keys::parse(npriv).ok();
+                }
+            }
+            None
+        }
+
+        let nostr_keys = nostr_keys_from_identity(args.identity);
+
+        let (contract, side) = if let Some((contract, side)) = &args.contract {
+            (Some(contract.clone()), *side)
+        } else {
+            (None, Side::None)
+        };
+
+        let peer_npub = if let Some(contract) = contract.as_ref() {
+            match side {
+                Side::Buyer => contract.get_seller_pubkey(),
+                Side::Seller => contract.get_buyer_pubkey(),
+                _ => None,
+            }
+        } else {
+            None
+        };
+
+        let (step, contract_state) = {
+            match (&nostr_keys, &peer_npub, &contract) {
+                (Some(_), Some(_), Some(contract)) => {
+                    let state = match contract.get_state() {
+                        crate::contract::ContractState::Refused
+                        | crate::contract::ContractState::Empty => ContractState::None,
+                        crate::contract::ContractState::Offered => ContractState::Offered,
+                        crate::contract::ContractState::Accepted => {
+                            if side == Side::Seller && contract.get_preimage().is_some() {
+                                // TODO: detect withdrawal
+                                ContractState::Unlocked
+                            } else if let Some(dispute) = contract.dispute() {
+                                // TODO: Funded / Locked should be detected by checking utxos
+                                match dispute.state() {
+                                    DisputeState::Offered => ContractState::DisputeOffered,
+                                    DisputeState::Accepted => ContractState::DisputeAccepted,
+                                    _ => ContractState::InDispute,
+                                }
+                            } else {
+                                ContractState::Accepted
+                            }
+                        }
+                    };
+
+                    (Step::Main, state)
+                }
+                (Some(_), Some(_), None) => (Step::Main, ContractState::None),
+                (Some(_), None, None) => (Step::PeerConnect, ContractState::None),
+                _ => (Step::NostrConnect, ContractState::None),
+            }
+        };
+
+        let mut escrow = Escrow {
+            step,
             npriv: "".to_string(),
             npriv_error: None,
-            nostr_keys: None,
+            nostr_keys,
             nostr_client: None,
             nostr_receiver: args.nostr_receiver,
             nostr_sender: args.nostr_sender,
@@ -706,26 +719,37 @@ impl Application for Escrow {
             bitcoin_sender: args.bitcoin_sender,
             connect_code: "".to_string(),
             npub: "".to_string(),
-            peer_npub: None,
+            peer_npub,
             peer_npub_str: "".to_string(),
-            contract: None,
-            contract_state: ContractState::None,
-            side: Side::None,
+            contract,
+            contract_state,
+            side,
             chat_input: "".to_string(),
             chat_history: history,
             total_amount: "".to_string(),
             deposit_amount: "".to_string(),
             timelock: "".to_string(),
+        if let Some(keys) = &escrow.nostr_keys {
+            escrow.send_nostr_msg(NostrMessage::Connect(keys.clone()));
+        }
+
+        // start watching address
+        if let Some(contract) = escrow.contract.as_ref() {
+            if let Some(addr) = contract.get_address() {
+                escrow.deposit_address = Some(addr.clone().to_string());
+                escrow.qr = Some(Data::new(addr.clone().to_string()).unwrap());
+                escrow.send_bitcoin_msg(BitcoinMessage::WatchAddress(addr));
+            }
+        }
+
             contract_text: Content::with_text(""),
             timelock_unit: TimelockUnit::Day,
             deposit_address: None,
             qr: None,
-            // qr: Some(Data::new("bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh").unwrap()),
             withdraw_address: "".to_string(),
             received_utxos: vec![],
             network: args.network,
-            locked_utxos: vec![],
-            hot_signer: Some(signer),
+            hot_signer,
             transactions: Vec::new(),
         };
 
