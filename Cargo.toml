@@ -24,6 +24,7 @@ async-hwi = "0.0.17"
 bip39 = {version = "2.0.0", features = ["rand"]}
 dirs = "5.0.1"
 serde_yaml = "0.9.34"
+clap = { version = "4.5.16", features = ["derive"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 iced = { version = "0.12.1",default-features = false, features = ["image", "debug", "webgl", "qr_code"]}
