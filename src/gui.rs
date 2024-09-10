@@ -1,30 +1,42 @@
-use crate::bitcoin::{BitcoinListener, BitcoinMessage};
-use crate::contract::{
-    self, to_miniscript_amount, Contract, ContractId, ContractMessage, Dispute, DisputeState,
-    SATOSHIS_PER_BITCOIN,
+use crate::{
+    bitcoin::{mempool::get_address_utxo::UtxoInfo, BitcoinListener, BitcoinMessage},
+    config,
+    contract::{
+        self, to_miniscript_amount, Contract, ContractId, ContractMessage, Dispute, DisputeState,
+        SATOSHIS_PER_BITCOIN,
+    },
+    hot_signer::TaprootHotSigner,
+    nostr::{generate_npriv, key_from_npriv, NostrListener, NostrMessage},
+    views::{
+        self,
+        chat::{ChatEntry, User},
+    },
 };
-use crate::hot_signer::TaprootHotSigner;
-use crate::mempool_space_api::get_address_utxo::UtxoInfo;
-use crate::nostr::{generate_npriv, key_from_npriv, NostrListener, NostrMessage};
-use crate::views::chat::{ChatEntry, User};
-use crate::{config, views};
 use async_channel::{Receiver, SendError, Sender};
 use bip39::Mnemonic;
 use bitcoin_amount::Amount;
-use iced::keyboard::key::Named;
-use iced::keyboard::{Key, Modifiers};
-use iced::widget::qr_code::Data;
-use iced::widget::text_editor::{Action, Content, Edit};
-use iced::widget::{focus_next, focus_previous};
-use iced::{executor, keyboard, Application, Element, Event, Subscription, Theme};
+use iced::{
+    executor,
+    keyboard::{self, key::Named, Key, Modifiers},
+    widget::{
+        focus_next, focus_previous,
+        qr_code::Data,
+        text_editor::{Action, Content, Edit},
+    },
+    Application, Element, Event, Subscription, Theme,
+};
 use iced_runtime::Command;
-use miniscript::bitcoin::{Address, Network, Transaction, TxOut};
-use miniscript::psbt::PsbtExt;
+use miniscript::{
+    bitcoin::{Address, Network, Transaction, TxOut},
+    psbt::PsbtExt,
+};
 use nostr_sdk::{Client, Keys, PublicKey, ToBech32};
 use serde::{Deserialize, Serialize};
-use std::fmt::{Display, Formatter};
-use std::str::FromStr;
-use std::sync::Arc;
+use std::{
+    fmt::{Display, Formatter},
+    str::FromStr,
+    sync::Arc,
+};
 
 const MIN_AMOUNT: f64 = 0.01;
 

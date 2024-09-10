@@ -1,7 +1,6 @@
 use std::str::FromStr;
 
-use crate::mempool_space_api::error::MemPoolError;
-use crate::mempool_space_api::{get_endpoint, NetworkApiUrl};
+use crate::bitcoin::mempool::{error::MemPoolError, get_endpoint, NetworkApiUrl};
 use bitcoin_amount::Amount;
 use miniscript::bitcoin::{Address, Network, OutPoint, ScriptBuf, TxIn, Txid, Witness};
 use serde::{Deserialize, Serialize};

@@ -1,7 +1,5 @@
-use crate::mempool_space_api::error::MemPoolError;
-use crate::mempool_space_api::NetworkApiUrl;
-use miniscript::bitcoin::consensus::encode::serialize_hex;
-use miniscript::bitcoin::{Network, Transaction};
+use crate::bitcoin::mempool::{error::MemPoolError, NetworkApiUrl};
+use miniscript::bitcoin::{consensus::encode::serialize_hex, Network, Transaction};
 
 pub async fn post_transaction(tx: Transaction, network: Network) -> Result<(), MemPoolError> {
     let url = format!("{}tx", &network.url());

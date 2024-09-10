@@ -1,4 +1,4 @@
-mod bitcoin;
+pub mod bitcoin;
 mod cli;
 mod client;
 mod config;
@@ -6,17 +6,19 @@ mod contract;
 mod gui;
 mod hot_signer;
 mod logger;
-mod mempool_space_api;
 mod nostr;
 pub mod signing_device;
 mod views;
 mod wallet;
 
-use crate::bitcoin::BitcoinClient;
-use crate::client::ClientFn;
-use crate::gui::{Escrow, Flags};
-use crate::nostr::{NostrArgs, NostrClient};
+use crate::{
+    bitcoin::mempool::client::MempoolClient,
+    gui::{Escrow, Flags},
+    nostr::{NostrArgs, NostrClient},
+};
+use bitcoin::{BackendType, BitcoinBackend};
 use clap::Parser;
+use client::ClientFn as _;
 use iced::{Application, Settings, Size};
 use miniscript::bitcoin::Network;
 
@@ -26,8 +28,7 @@ async fn main() {
 
     let args = cli::Cli::parse();
 
-    let (bitcoin_sender, gui_bitcoin_receiver) = async_channel::unbounded();
-    let (gui_bitcoin_sender, bitcoin_receiver) = async_channel::unbounded();
+    let mut bitcoin = BitcoinBackend::new(BackendType::Mempool);
 
     let (nostr_sender, gui_nostr_receiver) = async_channel::unbounded();
     let (gui_nostr_sender, nostr_receiver) = async_channel::unbounded();
@@ -35,14 +36,13 @@ async fn main() {
     let flags = Flags {
         nostr_sender: gui_nostr_sender,
         nostr_receiver: gui_nostr_receiver,
-        bitcoin_sender: gui_bitcoin_sender.clone(),
-        bitcoin_receiver: gui_bitcoin_receiver,
+        bitcoin_sender: bitcoin.gui_sender(),
+        bitcoin_receiver: bitcoin.gui_receiver(),
         network: Network::Signet,
         identity: args.identity(),
         contract: args.contract(),
     };
 
-    let bitcoin = BitcoinClient::new(bitcoin_sender, bitcoin_receiver, gui_bitcoin_sender);
     bitcoin.start();
 
     let args = NostrArgs {

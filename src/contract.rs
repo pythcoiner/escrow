@@ -1,5 +1,5 @@
+use crate::bitcoin::mempool::get_address_utxo::UtxoInfo;
 use crate::gui::TimelockUnit;
-use crate::mempool_space_api::get_address_utxo::UtxoInfo;
 use crate::wallet::{
     create_transaction, derive_xpub, encode_descriptor_pubkey, policy_to_taproot, MAX_DERIV,
 };
@@ -1069,8 +1069,8 @@ mod tests {
     };
 
     use crate::{
+        bitcoin::mempool::{get_address_txs::TxInfo, get_address_utxo::UtxoInfo},
         hot_signer::TaprootHotSigner,
-        mempool_space_api::{get_address_txs::TxInfo, get_address_utxo::UtxoInfo},
         wallet::create_transaction,
     };
 

@@ -1,13 +1,14 @@
-use crate::client::ClientFn;
-use crate::gui::Message;
-use crate::gui::Message::BitcoinClientMsg;
-use crate::listener;
-use crate::mempool_space_api::{
-    error::MemPoolError,
-    get_address_txs::{get_addresses_txs, TxInfo},
-    get_address_utxo::{get_addresses_utxos, UtxoInfo},
-    post_transaction::post_transaction,
+use crate::bitcoin::{
+    mempool::{
+        error::MemPoolError,
+        get_address_txs::{get_addresses_txs, TxInfo},
+        get_address_utxo::{get_addresses_utxos, UtxoInfo},
+        post_transaction::post_transaction,
+    },
+    BitcoinMessage, UtxoState,
 };
+use crate::client::ClientFn;
+use async_channel::{Receiver, Sender};
 use miniscript::bitcoin::{Address, Network, Transaction};
 use nostr_sdk::async_utility::tokio;
 use std::collections::hash_map::Entry;
@@ -15,52 +16,8 @@ use std::collections::HashMap;
 use std::str::FromStr;
 use std::time::Duration;
 
-listener!(BitcoinListener, BitcoinMessage, Message, BitcoinClientMsg);
-
-#[derive(Debug, Clone)]
 #[allow(unused)]
-pub enum BitcoinMessage {
-    // From GUI
-    WatchAddress(Address),
-    Broadcast(Transaction),
-    ReceiveTx(Transaction),
-    GetTransactions,
-
-    // To GUI
-    UserInfoMessage(String),
-    UtxoReceived(UtxoInfo),
-    UtxoConfirmed(UtxoInfo),
-    UtxoSpent(UtxoInfo),
-    ReceiveTransactions(Vec<Transaction>),
-
-    // Responses from mempool.space
-    GetAddressUtxos(Result<Vec<UtxoInfo>, MemPoolError>),
-    GetAddressTxs(Result<Vec<TxInfo>, MemPoolError>),
-    PostBroadcastTx(Result<(), MemPoolError>),
-
-    // Poll Timer
-    Poll,
-}
-
-#[allow(unused)]
-#[derive(Debug, Clone)]
-pub enum UtxoState {
-    Unconfirmed,
-    Confirmed,
-    Spent,
-    Unknown,
-}
-
-#[allow(unused)]
-#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
-pub struct TxOut {
-    txid: String,
-    vout: u32,
-    value: i64,
-}
-
-#[allow(unused)]
-pub struct BitcoinClient {
+pub struct MempoolClient {
     network: Network,
     sender: Sender<BitcoinMessage>,
     receiver: Receiver<BitcoinMessage>,
@@ -68,7 +25,7 @@ pub struct BitcoinClient {
     loopback: Sender<BitcoinMessage>,
 }
 
-impl BitcoinClient {
+impl MempoolClient {
     pub fn start(mut self) {
         tokio::spawn(async move {
             self.run().await;
@@ -83,7 +40,7 @@ impl BitcoinClient {
     fn send(sender: Sender<BitcoinMessage>, msg: BitcoinMessage) {
         tokio::spawn(async move {
             if sender.send(msg).await.is_err() {
-                log::error!("BitcoinClient.send_to_gui() => Cannot send message to GUI!")
+                log::error!("MempoolClient.send_to_gui() => Cannot send message to GUI!")
             }
         });
     }
@@ -99,7 +56,7 @@ impl BitcoinClient {
                 .await
                 .is_err()
             {
-                log::error!("BitcoinClient.get_addr_txs() => cannot send response!")
+                log::error!("MempoolClient.get_addr_txs() => cannot send response!")
             }
         });
     }
@@ -136,7 +93,7 @@ impl BitcoinClient {
                 .await
                 .is_err()
             {
-                log::error!("BitcoinClient.get_addr_utxo() => cannot send response!")
+                log::error!("MempoolClient.get_addr_utxo() => cannot send response!")
             }
         });
     }
@@ -240,7 +197,6 @@ impl BitcoinClient {
         }
     }
 
-    #[allow(unused)]
     pub fn broadcast_tx(&self, tx: Transaction) {
         let sender = self.loopback.clone();
         let network = self.network;
@@ -251,7 +207,7 @@ impl BitcoinClient {
                 .await
                 .is_err()
             {
-                log::error!("BitcoinClient.get_addr_utxo() => cannot send response!")
+                log::error!("MempoolClient.get_addr_utxo() => cannot send response!")
             }
         });
     }
@@ -276,13 +232,13 @@ impl BitcoinClient {
     }
 }
 
-impl ClientFn<BitcoinMessage, Sender<BitcoinMessage>> for BitcoinClient {
+impl ClientFn<BitcoinMessage, Sender<BitcoinMessage>> for MempoolClient {
     fn new(
         sender: Sender<BitcoinMessage>,
         receiver: Receiver<BitcoinMessage>,
         loopback: Sender<BitcoinMessage>,
     ) -> Self {
-        BitcoinClient {
+        MempoolClient {
             network: Network::Signet,
             sender,
             receiver,
@@ -297,7 +253,7 @@ impl ClientFn<BitcoinMessage, Sender<BitcoinMessage>> for BitcoinClient {
         self.poll_later();
         loop {
             if let Ok(msg) = self.receiver.try_recv() {
-                log::info!("BitcoinClient.run() msg: {:?}", msg);
+                log::info!("MempoolClient.run() msg: {:?}", msg);
                 match msg {
                     // From GUI
                     BitcoinMessage::WatchAddress(addr) => {
@@ -336,7 +292,7 @@ impl ClientFn<BitcoinMessage, Sender<BitcoinMessage>> for BitcoinClient {
                         self.try_poll_mempool();
                     }
                     _ => {
-                        log::error!("BitcoinClient unhandled Message")
+                        log::error!("MempoolClient unhandled Message")
                     }
                 }
             }

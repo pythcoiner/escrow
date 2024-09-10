@@ -12,7 +12,7 @@ use miniscript::{
 };
 use std::{collections::BTreeMap, str::FromStr, sync::Arc};
 
-use crate::mempool_space_api::get_address_utxo::UtxoInfo;
+use crate::bitcoin::mempool::get_address_utxo::UtxoInfo;
 
 pub(crate) const MAX_DERIV: u32 = (2u64.pow(31) - 1) as u32;
 

@@ -1,10 +1,11 @@
-use crate::mempool_space_api::error::MemPoolError;
+use crate::bitcoin::mempool::error::MemPoolError;
 use miniscript::bitcoin::Network;
 use reqwest::Response;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use std::future::Future;
 
+pub mod client;
 pub mod error;
 pub mod get_address_txs;
 pub mod get_address_utxo;
