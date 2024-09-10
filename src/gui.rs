@@ -1,5 +1,8 @@
 use crate::bitcoin::{BitcoinListener, BitcoinMessage};
-use crate::contract::{Contract, ContractId, ContractMessage};
+use crate::contract::{
+    self, to_miniscript_amount, Contract, ContractId, ContractMessage, Dispute, DisputeState,
+    SATOSHIS_PER_BITCOIN,
+};
 use crate::hot_signer::TaprootHotSigner;
 use crate::mempool_space_api::get_address_utxo::UtxoInfo;
 use crate::nostr::{generate_npriv, key_from_npriv, NostrListener, NostrMessage};
@@ -15,16 +18,11 @@ use iced::widget::text_editor::{Action, Content, Edit};
 use iced::widget::{focus_next, focus_previous};
 use iced::{executor, keyboard, Application, Element, Event, Subscription, Theme};
 use iced_runtime::Command;
-use miniscript::bitcoin::hashes::Hash;
-use miniscript::bitcoin::{Address, Network, Transaction};
+use miniscript::bitcoin::{Address, Network, Transaction, TxOut};
 use miniscript::psbt::PsbtExt;
 use nostr_sdk::{Client, Keys, PublicKey, ToBech32};
 use serde::{Deserialize, Serialize};
 use std::fmt::{Display, Formatter};
-use std::fs::File;
-use std::io::Write;
-use std::ops::Add;
-use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -46,8 +44,9 @@ pub enum ContractState {
     Funded,
     Locked,
     Unlocked,
-    #[allow(unused)]
     InDispute,
+    DisputeOffered,
+    DisputeAccepted,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -104,9 +103,9 @@ pub struct Flags {
     pub bitcoin_sender: Sender<BitcoinMessage>,
     pub bitcoin_receiver: Receiver<BitcoinMessage>,
     pub network: Network,
-}
     pub identity: Option<Identity>,
     pub contract: Option<(Contract, Side)>,
+}
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum Side {
@@ -116,6 +115,7 @@ pub enum Side {
     Escrow,
     None,
 }
+
 impl FromStr for Side {
     type Err = ();
 
@@ -128,7 +128,6 @@ impl FromStr for Side {
         })
     }
 }
-
 
 impl Display for Side {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
@@ -169,11 +168,12 @@ pub struct Escrow {
     deposit_address: Option<String>,
     qr: Option<Data>,
     withdraw_address: String,
-    received_utxos: Vec<UtxoInfo>,
-    locked_utxos: Vec<UtxoInfo>,
     transactions: Vec<Transaction>,
     network: Network,
     hot_signer: Option<TaprootHotSigner>,
+    my_dispute_amount: String,
+    peer_dispute_amount: String,
+    dispute_address: String,
 }
 
 impl Escrow {
@@ -183,7 +183,6 @@ impl Escrow {
         tokio::spawn(async move { sender.send(msg).await });
     }
 
-    #[allow(unused)]
     fn send_bitcoin_msg(&self, msg: BitcoinMessage) {
         let sender = self.bitcoin_sender.clone();
         tokio::spawn(async move { sender.send(msg).await });
@@ -262,13 +261,8 @@ impl Escrow {
         self.contract_text = Content::new();
         self.contract_text
             .perform(Action::Edit(Edit::Paste(Arc::new(contract.get_details()))));
-        // self.total_amount = (contract.get_amount().into_inner() as f64 / 100000000.0).to_string();
-        self.total_amount = (contract.get_amount().into_inner() as f64 / 100_000_000.0).to_string();
-        self.deposit_amount = if let Some(deposit) = contract.get_deposit() {
-            (deposit.into_inner() as f64 / 100_000_000.0).to_string()
-        } else {
-            "".to_string()
-        };
+        self.total_amount = contract.get_amount_str();
+        self.deposit_amount = contract.get_deposit_str();
         if let Some(timelock) = contract.get_timelock() {
             self.timelock = timelock.to_string();
         }
@@ -371,6 +365,179 @@ impl Escrow {
         }
     }
 
+    fn maybe_start_dispute(&mut self) {
+        if let ContractState::Locked = self.contract_state {
+            self.contract_state = ContractState::InDispute;
+        }
+    }
+
+    pub fn can_send_dispute_offer(&self) -> bool {
+        let btc = f64::from_str(self.my_dispute_amount());
+        if let Ok(_f) = btc {
+            // let amount = Amount::from_btc(f);
+            // let amount_is_valid = self.contract_locked_amount() >= amount;
+            let address_valid = Address::from_str(self.dispute_address()).is_ok();
+            // return amount_is_valid && address_valid && self.side() == Side::Seller;
+            return address_valid && self.side() == Side::Seller;
+        }
+        false
+    }
+
+    fn send_dispute_offer(&mut self) {
+        assert_eq!(self.side(), Side::Seller);
+        let contract = self.contract.as_mut().expect("Must have a contract");
+        contract.clear_dispute();
+        let amount = f64::from_str(&self.my_dispute_amount.clone()).expect("Amount must be valid");
+        contract.set_dispute_amount(Amount::from_btc(amount));
+        let address = self.dispute_address.clone();
+        assert!(Address::from_str(&address).is_ok());
+        contract.set_dispute_seller_address(address);
+        assert_eq!(
+            contract.dispute().as_ref().unwrap().state(),
+            DisputeState::Offered
+        );
+
+        let message = NostrMessage::Contract(Box::new(ContractMessage::Dispute(
+            contract.hash(contract::ContractState::Accepted).unwrap(),
+            self.peer_npub.expect("Must have a peer"),
+            contract.dispute().clone().expect("Must have a dispute"),
+        )));
+        self.send_nostr_msg(message);
+        self.contract_state = ContractState::DisputeOffered;
+    }
+
+    fn dispute_offered(&mut self, dispute: Dispute) {
+        assert_eq!(dispute.state(), DisputeState::Offered);
+        // TODO: sanity check dispute
+
+        self.contract_state = ContractState::DisputeOffered;
+
+        let contract = self.contract.as_mut().expect("Must have a contract");
+        contract.receive_dispute_offer(dispute);
+
+        // we fetch the transaction early, we will need them to craft psbt later
+        self.transactions = Vec::new();
+        self.get_transactions();
+        self.save_contract();
+    }
+
+    pub fn can_accept_dispute(&self) -> bool {
+        // TODO: check summed outputs amount we own in transactions >= dispute total amount
+        !self.transactions.is_empty()
+    }
+
+    fn accept_dispute(&mut self) {
+        assert!(!self.transactions.is_empty());
+        assert_eq!(&self.side(), &Side::Buyer);
+        let contract = self.contract.as_mut().unwrap();
+        let signer = self.hot_signer.as_mut().unwrap();
+        let seller_fingerprint = contract
+            .get_seller_fingerprint()
+            .expect("Must have a fingerprint");
+        let buyer_fingerprint = contract
+            .get_buyer_fingerprint()
+            .expect("Must have a fingerprint");
+        let fingerprints = vec![seller_fingerprint, buyer_fingerprint];
+        contract.set_dispute_buyer_address(self.dispute_address.clone());
+        assert_eq!(
+            contract
+                .dispute()
+                .as_ref()
+                .expect("Must have a dispute")
+                .state(),
+            DisputeState::Accepted
+        );
+
+        let outputs = vec![
+            TxOut {
+                value: to_miniscript_amount(
+                    contract
+                        .dispute_buyer_amount()
+                        .expect("Must have an amount"),
+                ),
+                script_pubkey: contract
+                    .dispute_buyer_address()
+                    .expect("Must have an address")
+                    .into(),
+            },
+            TxOut {
+                value: to_miniscript_amount(
+                    contract
+                        .dispute_seller_amount()
+                        .expect("Must have an amount"),
+                ),
+                script_pubkey: contract
+                    .dispute_seller_address()
+                    .expect("Must have an address")
+                    .into(),
+            },
+        ];
+
+        let mut psbt = contract
+            .craft_dispute_psbt(
+                self.transactions.clone(),
+                fingerprints,
+                outputs,
+                self.network,
+                1,
+            )
+            .unwrap();
+
+        signer.sign(&mut psbt);
+
+        contract.update_dispute_psbt(psbt);
+
+        let message = NostrMessage::Contract(Box::new(ContractMessage::Dispute(
+            contract.hash(contract::ContractState::Accepted).unwrap(),
+            self.peer_npub.expect("Must have a peer"),
+            contract.dispute().clone().expect("Must have a dispute"),
+        )));
+        self.send_nostr_msg(message);
+        self.contract_state = ContractState::DisputeAccepted;
+        self.save_contract();
+    }
+
+    fn dispute_accepted(&mut self, dispute: Dispute) {
+        assert_eq!(dispute.state(), DisputeState::Accepted);
+        self.contract_state = ContractState::DisputeAccepted;
+
+        let signer = self.hot_signer.as_mut().unwrap();
+        let mut psbt = dispute.psbt.expect("Must have a psbt");
+
+        signer.sign(&mut psbt);
+
+        PsbtExt::finalize_mut(&mut psbt, signer.secp()).unwrap();
+        self.contract
+            .as_mut()
+            .expect("Must have a contract")
+            .update_dispute_psbt(psbt.clone());
+        self.save_contract();
+
+        log::debug!("Finalized PSBT: {}", psbt);
+
+        let tx = psbt.extract_tx_unchecked_fee_rate();
+
+        self.send_bitcoin_msg(BitcoinMessage::Broadcast(tx));
+    }
+
+    fn refuse_dispute(&mut self) {
+        self.contract_state = ContractState::InDispute;
+        let contract = self.contract.as_mut().unwrap();
+        contract.clear_dispute();
+
+        let message = NostrMessage::Contract(Box::new(ContractMessage::Dispute(
+            contract.hash(contract::ContractState::Accepted).unwrap(),
+            self.peer_npub.expect("Must have a peer"),
+            Dispute::new(),
+        )));
+        self.send_nostr_msg(message);
+        self.save_contract();
+    }
+
+    fn dispute_refused(&mut self) {
+        self.contract_state = ContractState::InDispute;
+    }
+
     fn get_transactions(&self) {
         self.send_bitcoin_msg(BitcoinMessage::GetTransactions);
     }
@@ -390,30 +557,18 @@ impl Escrow {
 
     fn withdraw(&mut self, preimage: &[u8; 32], address: Address) {
         let contract = self.contract.as_mut().unwrap();
-        let hash = contract.get_buyer_hash().unwrap();
-        let hash = miniscript::bitcoin::hashes::sha256::Hash::from_byte_array(hash);
-        let utxos = self.locked_utxos.clone();
-
         let signer = self.hot_signer.as_mut().unwrap();
 
-        let policy = contract.build_wallet_policy().unwrap();
-        let descriptor = policy_to_taproot(policy, self.network).unwrap();
-        let fingerprints = vec![signer.fingerprint()];
-        let hash = (hash, preimage);
-
-        //  FIXME: Handle fees
-        let mut psbt = create_transaction(
-            descriptor,
-            fingerprints,
-            Some(hash),
-            None,
-            address,
-            utxos,
-            // TODO: handle txs
-            self.transactions.clone(),
-            1,
-            self.network,
-        );
+        let mut psbt = contract
+            .craft_withdraw_psbt(
+                preimage,
+                self.transactions.clone(),
+                signer.fingerprint(),
+                address,
+                self.network,
+                1,
+            )
+            .unwrap();
 
         signer.sign(&mut psbt);
 
@@ -502,37 +657,32 @@ impl Escrow {
     }
 
     fn utxo_received(&mut self, utxo: UtxoInfo) {
-        self.received_utxos.push(utxo);
+        if let Some(contract) = self.contract.as_mut() {
+            contract.utxo_received(utxo);
+        }
         self.update_utxo_state()
     }
 
     fn utxo_confirmed(&mut self, utxo: UtxoInfo) {
-        // move utxo from received to locked
-        self.received_utxos.retain(|x| x != &utxo);
-        self.locked_utxos.push(utxo);
-
+        if let Some(contract) = self.contract.as_mut() {
+            contract.utxo_confirmed(utxo);
+        }
         self.update_utxo_state()
     }
 
     fn utxo_spent(&mut self, utxo: UtxoInfo) {
-        // remove utxo
-        self.locked_utxos.retain(|x| x != &utxo);
+        if let Some(contract) = self.contract.as_mut() {
+            contract.utxo_spent(utxo);
+        }
 
         self.update_utxo_state()
     }
 
     fn update_utxo_state(&mut self) {
-        let received = self
-            .received_utxos
-            .iter()
-            .fold(Amount::zero(), |sum, tx| sum.add(tx.amount()));
-
-        let locked = self
-            .locked_utxos
-            .iter()
-            .fold(Amount::zero(), |sum, tx| sum.add(tx.amount()));
-
-        let contract_total = self.contract.as_ref().unwrap().get_amount();
+        let contract = self.contract.as_ref().unwrap();
+        let received = contract.get_received_utxo_amount();
+        let locked = contract.get_locked_utxo_amount();
+        let contract_total = contract.get_amount();
 
         match self.contract_state {
             ContractState::Accepted => {
@@ -617,6 +767,72 @@ impl Escrow {
 
     pub fn chat_input(&self) -> &str {
         &self.chat_input
+    }
+
+    pub fn my_dispute_amount(&self) -> &str {
+        &self.my_dispute_amount
+    }
+
+    pub fn peer_dispute_amount(&self) -> &str {
+        &self.peer_dispute_amount
+    }
+
+    pub fn dispute_address(&self) -> &str {
+        &self.dispute_address
+    }
+
+    pub fn contract_total_amount(&self) -> Option<Amount> {
+        self.contract.as_ref().map(|c| c.get_amount())
+    }
+
+    pub fn contract_locked_amount(&self) -> Amount {
+        if let Some(contract) = self.contract.as_ref() {
+            contract.get_locked_utxo_amount()
+        } else {
+            Amount::zero()
+        }
+    }
+
+    pub fn my_amount(&self) -> Amount {
+        match self.side() {
+            Side::Buyer | Side::Seller => self
+                .contract
+                .as_ref()
+                .map(|c| {
+                    let (seller, buyer) = {
+                        match c.dispute() {
+                            Some(dispute) => (
+                                dispute.seller_amount,
+                                c.get_amount() - dispute.seller_amount,
+                            ),
+                            None => (c.get_amount(), Amount::zero()),
+                        }
+                    };
+                    match self.side() {
+                        Side::Buyer => buyer,
+                        Side::Seller => seller,
+                        _ => unreachable!("Side should be buyer or seller"),
+                    }
+                })
+                .unwrap_or(Amount::zero()),
+            _ => Amount::zero(),
+        }
+    }
+
+    pub fn peer_amount(&self) -> Amount {
+        if let Some(total) = self.contract_total_amount() {
+            total - self.my_amount()
+        } else {
+            Amount::zero()
+        }
+    }
+
+    pub fn my_amount_str(&self) -> String {
+        (self.my_amount().into_inner() as f64 / SATOSHIS_PER_BITCOIN).to_string()
+    }
+
+    pub fn peer_amount_str(&self) -> String {
+        (self.peer_amount().into_inner() as f64 / SATOSHIS_PER_BITCOIN).to_string()
     }
 }
 
@@ -729,6 +945,19 @@ impl Application for Escrow {
             total_amount: "".to_string(),
             deposit_amount: "".to_string(),
             timelock: "".to_string(),
+            contract_text: Content::with_text(""),
+            timelock_unit: TimelockUnit::Day,
+            deposit_address: None,
+            qr: None,
+            withdraw_address: "".to_string(),
+            network: args.network,
+            hot_signer,
+            transactions: Vec::new(),
+            my_dispute_amount: "".to_string(),
+            peer_dispute_amount: "".to_string(),
+            dispute_address: "".to_string(),
+        };
+
         if let Some(keys) = &escrow.nostr_keys {
             escrow.send_nostr_msg(NostrMessage::Connect(keys.clone()));
         }
@@ -741,17 +970,6 @@ impl Application for Escrow {
                 escrow.send_bitcoin_msg(BitcoinMessage::WatchAddress(addr));
             }
         }
-
-            contract_text: Content::with_text(""),
-            timelock_unit: TimelockUnit::Day,
-            deposit_address: None,
-            qr: None,
-            withdraw_address: "".to_string(),
-            received_utxos: vec![],
-            network: args.network,
-            hot_signer,
-            transactions: Vec::new(),
-        };
 
         (escrow, Command::none())
     }
@@ -844,6 +1062,19 @@ impl Application for Escrow {
             Message::WithdrawAddress(addr) => {
                 self.withdraw_address = addr;
             }
+            Message::DisputeAmount(amount) => {
+                // TODO: sanity check amount
+                self.my_dispute_amount.clone_from(&amount);
+                // TODO: process peer dispute amount
+            }
+            Message::DisputeAddress(address) => {
+                // TODO: sanity check adress
+                self.dispute_address = address;
+            }
+            Message::Dispute => self.maybe_start_dispute(),
+            Message::SendDisputeOffer => self.send_dispute_offer(),
+            Message::AcceptDisputeOffer => self.accept_dispute(),
+            Message::RefuseDisputeOffer => self.refuse_dispute(),
             Message::Withdraw => {
                 // Get list of utxos first in order to withdraw
                 self.get_transactions()
@@ -952,6 +1183,17 @@ impl Application for Escrow {
                         // TODO: sanity check id and peer
                         self.contract_unlocked(&preimage);
                     }
+                    (side, ContractMessage::Dispute(_contract_id, _peer, dispute)) => {
+                        // TODO: sanity check id and peer
+                        match (side, &dispute.state()) {
+                            (Side::Buyer, DisputeState::Offered) => self.dispute_offered(dispute),
+                            (Side::Seller, DisputeState::Accepted) => {
+                                self.dispute_accepted(dispute)
+                            }
+                            (Side::Seller, DisputeState::Refused) => self.dispute_refused(),
+                            _ => log::error!("Unknown dispute state"),
+                        }
+                    }
                     _ => {
                         log::error!(
                             "Escrow.update() => Unhandled (side={:?}, step={:?}, msg={:?})",
@@ -1040,6 +1282,9 @@ pub enum Message {
     UnlockPayment,
     Withdraw,
     SendChat,
+    SendDisputeOffer,
+    AcceptDisputeOffer,
+    RefuseDisputeOffer,
 
     UpdateStep,
     WalletFunded,
@@ -1062,6 +1307,8 @@ pub enum Message {
     ContractDetail(Action),
     WithdrawAddress(String),
     ChatMsg(String),
+    DisputeAmount(String),
+    DisputeAddress(String),
 
     WindowResized(iced::window::Id, u32, u32),
     TabPressed(Modifiers),

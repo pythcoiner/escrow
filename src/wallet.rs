@@ -256,11 +256,10 @@ pub fn create_transaction(
     fingerprints: Vec<Fingerprint>,
     hash: Option<(sha256::Hash, &[u8; 32])>,
     timelock: Option<u32>,
-    destination: miniscript::bitcoin::address::Address,
     utxos: Vec<UtxoInfo>,
     txs: Vec<Transaction>,
+    mut outputs: Vec<TxOut>,
     fee_rate: u64,
-    network: Network,
 ) -> Psbt {
     if fingerprints.is_empty() {
         panic!("Need at list one signer!")
@@ -270,28 +269,17 @@ pub fn create_transaction(
 
     // check  if supplied fingerprints match w/ descriptor
     if let Descriptor::Tr(tr) = descriptor.clone() {
-        // // check if we can sign w/ the internal key
-        // let internal_fg = tr.internal_key().master_fingerprint();
-        // if fingerprints.contains(&internal_fg) {
-        //     signing_fingerprints.push(internal_fg);
-        // } else {
-        //     panic!("We should have an XPub type here!")
-        // }
-
-        // if we got the internal key we do not need others
-        if signing_fingerprints.is_empty() {
-            // Check fingerprint in taptree
-            if tr.tap_tree().is_some() {
-                tr.for_each_key(|k| {
-                    let fg = k.master_fingerprint();
-                    if fingerprints.contains(&fg) && !signing_fingerprints.contains(&fg) {
-                        signing_fingerprints.push(fg);
-                    }
-                    // return true to iter over all keys
-                    true
-                });
-            };
-        }
+        // Check fingerprint in taptree
+        if tr.tap_tree().is_some() {
+            tr.for_each_key(|k| {
+                let fg = k.master_fingerprint();
+                if fingerprints.contains(&fg) && !signing_fingerprints.contains(&fg) {
+                    signing_fingerprints.push(fg);
+                }
+                // return true to iter over all keys
+                true
+            });
+        };
 
         if signing_fingerprints.is_empty() {
             panic!("No key fingerprints matches with descriptor!");
@@ -301,12 +289,6 @@ pub fn create_transaction(
     }
 
     // TODO: if locktime passed, check if match w/ descriptor
-
-    // Process the total amount
-    let total_amount = utxos.iter().fold(0i64, |a, e| a + e.value);
-    let total_amount = Amount::from_sat(total_amount as u64);
-
-    let contract_addr = descriptor.address(network).unwrap();
 
     // Populate Tx inputs from UtxoInfos
     let inputs: Vec<TxIn> = utxos
@@ -346,17 +328,6 @@ pub fn create_transaction(
         psbt_inputs.push(inp);
     }
 
-    // Check destination != contract address
-    if destination == contract_addr {
-        panic!("We should not let user relock funds!")
-    }
-
-    // Populate Tx Outputs w/ destination infos
-    let outputs = vec![TxOut {
-        value: total_amount,
-        script_pubkey: destination.clone().into(),
-    }];
-
     // Prepare PSBT outputs
     let psbt_out = miniscript::bitcoin::psbt::Output::default();
     let psbt_outputs = vec![psbt_out];
@@ -368,7 +339,7 @@ pub fn create_transaction(
         lock_time: LockTime::Blocks(Height::ZERO),
         input: inputs,
         // we fill output in order to get the weight, will replace w/ amount - fee later
-        output: outputs,
+        output: outputs.clone(),
     };
 
     // process fee amount
@@ -376,10 +347,11 @@ pub fn create_transaction(
     let wu = tx.weight().to_wu();
     let fee_sats = Amount::from_sat(wu * fee_rate);
 
-    let outputs = vec![TxOut {
-        value: total_amount - fee_sats,
-        script_pubkey: destination.into(),
-    }];
+    // fees are taken from the first output
+    if let Some(output) = outputs.get_mut(0) {
+        // FIXME: sanity check
+        output.value -= fee_sats;
+    }
 
     // replace outputs w/ final amount w/ fees decreased
     tx.output = outputs;

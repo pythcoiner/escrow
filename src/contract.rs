@@ -1,9 +1,13 @@
 use crate::gui::TimelockUnit;
-use crate::wallet::{derive_xpub, encode_descriptor_pubkey, policy_to_taproot, MAX_DERIV};
+use crate::mempool_space_api::get_address_utxo::UtxoInfo;
+use crate::wallet::{
+    create_transaction, derive_xpub, encode_descriptor_pubkey, policy_to_taproot, MAX_DERIV,
+};
 use bitcoin_amount::{Amount, MIN};
-use miniscript::bitcoin::bip32::{ChildNumber, DerivationPath};
+use miniscript::bitcoin::bip32::{ChildNumber, DerivationPath, Fingerprint};
 use miniscript::bitcoin::hashes::{sha256, Hash, HashEngine};
-use miniscript::bitcoin::{Address, Network, Sequence};
+use miniscript::bitcoin::{Address, Network, Psbt, Sequence, Transaction, TxOut};
+use miniscript::descriptor::DescriptorXKey;
 use miniscript::policy::Concrete;
 use miniscript::DescriptorPublicKey;
 use nostr_sdk::bitcoin::secp256k1::{ecdsa::Signature, Message, PublicKey as SecpKey, Secp256k1};
@@ -17,6 +21,12 @@ use std::sync::Arc;
 
 pub type ContractId = sha256::Hash;
 pub type Peer = PublicKey;
+
+pub const SATOSHIS_PER_BITCOIN: f64 = 100_000_000.0;
+
+pub fn to_miniscript_amount(amount: Amount) -> miniscript::bitcoin::Amount {
+    miniscript::bitcoin::Amount::from_sat(amount.into_inner() as u64)
+}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 pub enum ContractState {
@@ -85,6 +95,46 @@ pub enum ContractError {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Dispute {
+    pub seller_amount: Amount,
+    pub seller_address: Option<String>,
+    pub buyer_address: Option<String>,
+    pub psbt: Option<Psbt>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum DisputeState {
+    Offered,
+    Accepted,
+    Refused,
+    Unknown,
+}
+
+impl Dispute {
+    pub fn new() -> Self {
+        Self {
+            seller_amount: Amount::zero(),
+            seller_address: None,
+            buyer_address: None,
+            psbt: None,
+        }
+    }
+
+    pub fn state(&self) -> DisputeState {
+        match (
+            self.seller_address.is_some(),
+            self.buyer_address.is_some(),
+            self.psbt.is_some(),
+        ) {
+            (true, true, true) => DisputeState::Accepted,
+            (true, false, false) => DisputeState::Offered,
+            (false, false, false) => DisputeState::Refused,
+            _ => DisputeState::Unknown,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Contract {
     version: u32,
     id: Option<ContractId>,
@@ -99,6 +149,9 @@ pub struct Contract {
     seller_signature: Option<Signature>,
     contract_policy: ContractPolicy,
     preimage: Option<Vec<u8>>,
+    received_utxos: Vec<UtxoInfo>,
+    locked_utxos: Vec<UtxoInfo>,
+    dispute: Option<Dispute>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -143,7 +196,6 @@ impl ContractPolicy {
     }
 }
 
-#[allow(unused)]
 impl Contract {
     // Chainable
     pub fn new(network: Network) -> Self {
@@ -161,6 +213,9 @@ impl Contract {
             seller_signature: None,
             contract_policy: ContractPolicy::new(network),
             preimage: None,
+            dispute: None,
+            received_utxos: Vec::new(),
+            locked_utxos: Vec::new(),
         }
     }
 
@@ -281,6 +336,52 @@ impl Contract {
         self.contract_policy.address = Some(addr.to_string());
     }
 
+    pub fn maybe_create_dispute(&mut self) {
+        if self.dispute.is_none() {
+            self.dispute = Some(Dispute::new());
+        }
+    }
+
+    pub fn clear_dispute(&mut self) {
+        self.dispute = None;
+    }
+
+    pub fn receive_dispute_offer(&mut self, dispute: Dispute) {
+        if let DisputeState::Offered = dispute.state() {
+            self.dispute = Some(dispute);
+        }
+    }
+
+    pub fn set_dispute_amount(&mut self, amount: Amount) {
+        self.maybe_create_dispute();
+        self.dispute
+            .as_mut()
+            .expect("Should have a dispute")
+            .seller_amount = amount;
+    }
+
+    pub fn set_dispute_seller_address(&mut self, address: String) {
+        self.maybe_create_dispute();
+        self.dispute
+            .as_mut()
+            .expect("Should have a dispute")
+            .seller_address = Some(address);
+    }
+
+    pub fn set_dispute_buyer_address(&mut self, address: String) {
+        self.maybe_create_dispute();
+        self.dispute
+            .as_mut()
+            .expect("Should have a dispute")
+            .buyer_address = Some(address);
+    }
+
+    pub fn update_dispute_psbt(&mut self, psbt: Psbt) {
+        if let Some(dispute) = self.dispute.as_mut() {
+            dispute.psbt = Some(psbt);
+        }
+    }
+
     pub fn store_preimage(&mut self, preimage: &[u8; 32]) {
         let preimage = preimage.to_vec();
         self.preimage = Some(preimage);
@@ -310,9 +411,22 @@ impl Contract {
     pub fn get_amount(&self) -> Amount {
         self.total_amount
     }
+    // self.total_amount = (contract.get_amount().into_inner() as f64 / 100_000_000.0).to_string();
+
+    pub fn get_amount_str(&self) -> String {
+        (self.total_amount.into_inner() as f64 / SATOSHIS_PER_BITCOIN).to_string()
+    }
 
     pub fn get_deposit(&self) -> Option<Amount> {
         self.deposit
+    }
+
+    pub fn get_deposit_str(&self) -> String {
+        if let Some(deposit) = self.deposit {
+            (deposit.into_inner() as f64 / SATOSHIS_PER_BITCOIN).to_string()
+        } else {
+            "0".to_string()
+        }
     }
 
     pub fn get_details(&self) -> String {
@@ -335,8 +449,34 @@ impl Contract {
         self.contract_policy.buyer_xpub.clone()
     }
 
+    pub fn get_buyer_fingerprint(&self) -> Option<Fingerprint> {
+        self.get_buyer_xpub().map(|p| match p {
+            DescriptorPublicKey::XPub(DescriptorXKey { origin, .. }) => {
+                if let Some((fg, _)) = origin {
+                    fg
+                } else {
+                    panic!("Must have an origin")
+                }
+            }
+            _ => unreachable!("Must be an XPub"),
+        })
+    }
+
     pub fn get_seller_xpub(&self) -> Option<DescriptorPublicKey> {
         self.contract_policy.seller_xpub.clone()
+    }
+
+    pub fn get_seller_fingerprint(&self) -> Option<Fingerprint> {
+        self.get_seller_xpub().map(|p| match p {
+            DescriptorPublicKey::XPub(DescriptorXKey { origin, .. }) => {
+                if let Some((fg, _)) = origin {
+                    fg
+                } else {
+                    panic!("Must have an origin")
+                }
+            }
+            _ => unreachable!("Must be an XPub"),
+        })
     }
 
     pub fn get_buyer_hash(&self) -> Option<[u8; 32]> {
@@ -361,6 +501,80 @@ impl Contract {
 
     pub fn get_contract_policy(&self) -> &ContractPolicy {
         &self.contract_policy
+    }
+
+    pub fn get_received_utxo_amount(&self) -> Amount {
+        self.received_utxos
+            .iter()
+            .fold(Amount::zero(), |sum, tx| sum + tx.amount())
+    }
+
+    pub fn get_locked_utxo_amount(&self) -> Amount {
+        self.locked_utxos
+            .iter()
+            .fold(Amount::zero(), |sum, tx| sum + tx.amount())
+    }
+
+    pub fn get_locked_utxos(&self) -> Vec<UtxoInfo> {
+        self.locked_utxos.clone()
+    }
+
+    pub fn utxo_received(&mut self, utxo: UtxoInfo) {
+        self.received_utxos.push(utxo);
+    }
+
+    pub fn utxo_confirmed(&mut self, utxo: UtxoInfo) {
+        // move utxo from received to locked
+        self.received_utxos.retain(|x| x != &utxo);
+        self.locked_utxos.push(utxo);
+    }
+
+    pub fn utxo_spent(&mut self, utxo: UtxoInfo) {
+        // remove utxo
+        self.locked_utxos.retain(|x| x != &utxo);
+    }
+
+    pub fn dispute(&self) -> &Option<Dispute> {
+        &self.dispute
+    }
+
+    pub fn dispute_seller_amount(&self) -> Option<Amount> {
+        self.dispute.as_ref().map(|dispute| dispute.seller_amount)
+    }
+
+    pub fn dispute_buyer_amount(&self) -> Option<Amount> {
+        self.dispute_seller_amount()
+            .map(|amount| self.get_locked_utxo_amount() - amount)
+    }
+
+    pub fn dispute_seller_address(&self) -> Option<Address> {
+        if let Some(dispute) = &self.dispute {
+            Address::from_str(
+                dispute
+                    .seller_address
+                    .as_ref()
+                    .expect("Must have an address"),
+            )
+            .map(|a| a.assume_checked())
+            .ok()
+        } else {
+            None
+        }
+    }
+
+    pub fn dispute_buyer_address(&self) -> Option<Address> {
+        if let Some(dispute) = &self.dispute {
+            Address::from_str(
+                dispute
+                    .buyer_address
+                    .as_ref()
+                    .expect("Must have an address"),
+            )
+            .map(|a| a.assume_checked())
+            .ok()
+        } else {
+            None
+        }
     }
 
     pub fn to_json(&self) -> Result<String, ContractError> {
@@ -750,6 +964,90 @@ impl Contract {
         self.buyer_signature = Some(signature);
         Ok(())
     }
+
+    pub fn craft_withdraw_psbt(
+        &mut self,
+        preimage: &[u8; 32],
+        transactions: Vec<Transaction>,
+        fingerprint: Fingerprint,
+        address: Address,
+        network: Network,
+        fees: u64,
+    ) -> Result<Psbt, ContractError> {
+        let hash = self
+            .get_buyer_hash()
+            .ok_or(ContractError::BuyerHashNeeded)?;
+        let hash = miniscript::bitcoin::hashes::sha256::Hash::from_byte_array(hash);
+        let utxos = self.get_locked_utxos();
+
+        let policy = self.build_wallet_policy().unwrap();
+        let descriptor = policy_to_taproot(policy, network).unwrap();
+        let fingerprints = vec![fingerprint];
+        let hash = (hash, preimage);
+
+        let contract_addr = descriptor.address(network).unwrap();
+
+        // Check destination != contract address
+        if address == contract_addr {
+            panic!("We should not let user relock funds!")
+        }
+
+        // Process the total amount
+        let total_amount = utxos.iter().fold(0i64, |a, e| a + e.value);
+        let total_amount = miniscript::bitcoin::Amount::from_sat(total_amount as u64);
+
+        // Populate Tx Outputs w/ destination infos
+        let outputs = vec![TxOut {
+            value: total_amount,
+            script_pubkey: address.into(),
+        }];
+
+        Ok(create_transaction(
+            descriptor,
+            fingerprints,
+            Some(hash),
+            None,
+            utxos,
+            transactions,
+            outputs,
+            fees,
+        ))
+    }
+
+    pub fn craft_dispute_psbt(
+        &mut self,
+        transactions: Vec<Transaction>,
+        fingerprints: Vec<Fingerprint>,
+        outputs: Vec<TxOut>,
+        network: Network,
+        fees: u64,
+    ) -> Result<Psbt, ContractError> {
+        let utxos = self.get_locked_utxos();
+
+        let policy = self.build_wallet_policy().unwrap();
+        let descriptor = policy_to_taproot(policy, network).unwrap();
+
+        // Process the total amount
+        let total_amount = utxos.iter().fold(0i64, |a, e| a + e.value);
+
+        let total_outputs = outputs
+            .iter()
+            .fold(0i64, |sum, output| sum + (output.value.to_sat() as i64));
+
+        // FIXME: move this sanity check to create_transaction()
+        assert!(total_outputs <= total_amount);
+
+        Ok(create_transaction(
+            descriptor,
+            fingerprints,
+            None,
+            None,
+            utxos,
+            transactions,
+            outputs,
+            fees,
+        ))
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -760,7 +1058,7 @@ pub enum ContractMessage {
     Funded(ContractId, Peer),
     Lock(ContractId, Peer),
     Unlock(ContractId, [u8; 32], Peer),
-    Dispute(ContractId, Peer),
+    Dispute(ContractId, Peer, Dispute),
 }
 
 #[cfg(test)]
@@ -935,17 +1233,19 @@ mod tests {
 
         let fingerprints = vec![seller_signer.fingerprint()];
         let hash = Some((hash, &preimage));
-        let mut psbt = create_transaction(
-            descriptor,
-            fingerprints,
-            hash,
-            None,
-            destination,
-            utxos,
-            txs,
-            1,
-            Network::Signet,
-        );
+
+        // Process the total amount
+        let total_amount = utxos.iter().fold(0i64, |a, e| a + e.value);
+        let total_amount = miniscript::bitcoin::Amount::from_sat(total_amount as u64);
+
+        // Populate Tx Outputs w/ destination infos
+        let outputs = vec![TxOut {
+            value: total_amount,
+            script_pubkey: destination.into(),
+        }];
+
+        let mut psbt =
+            create_transaction(descriptor, fingerprints, hash, None, utxos, txs, outputs, 1);
 
         // seller sign tx
         seller_signer.sign(&mut psbt);

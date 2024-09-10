@@ -28,16 +28,16 @@ pub fn contract_column(escrow: &Escrow) -> Column<Message> {
         (Side::Buyer, ContractState::Funded) => "Contract funded (unconfirmed)...",
         (Side::Buyer, ContractState::Locked) => "Funds locked in escrow!",
         (Side::Buyer, ContractState::Unlocked) => "Payment finalized",
+        (_, ContractState::InDispute) | (_, ContractState::DisputeOffered) => "Dispute Offer",
+        (_, ContractState::DisputeAccepted) => "Dispute Accepted",
         _ => "",
     };
-
-    let send = escrow.is_contract_valid();
 
     let buttons = match (side, step) {
         (Side::Seller, ContractState::None) => btn_row(
             vec![(
                 "Send contract!",
-                if send {
+                if escrow.is_contract_valid() {
                     Some(Message::OfferContract)
                 } else {
                     None
@@ -71,11 +71,30 @@ pub fn contract_column(escrow: &Escrow) -> Column<Message> {
             btn_row(vec![("Tx mined", Some(Message::TxMined))], true)
         }
         (Side::Buyer, ContractState::Locked) => {
-            btn_row(
-                vec![("Unlock", Some(Message::UnlockFunds)), ("Dispute", None)], // Some(Message::Dispute)
-                false,
-            )
+            btn_row(vec![("Unlock", Some(Message::UnlockFunds))], false)
         }
+        (Side::Seller, ContractState::InDispute) => {
+            let message = if escrow.can_send_dispute_offer() {
+                Some(Message::SendDisputeOffer)
+            } else {
+                None
+            };
+            btn_row(vec![("Send", message)], false)
+        }
+        (Side::Buyer, ContractState::DisputeOffered) => btn_row(
+            vec![
+                (
+                    "Accept",
+                    if escrow.can_accept_dispute() {
+                        Some(Message::AcceptDisputeOffer)
+                    } else {
+                        None
+                    },
+                ),
+                ("Refuse", Some(Message::RefuseDisputeOffer)),
+            ],
+            false,
+        ),
         _ => {
             row!(Space::with_height(25))
         }
@@ -84,6 +103,9 @@ pub fn contract_column(escrow: &Escrow) -> Column<Message> {
     let content = match (side, step) {
         (Side::Seller, ContractState::Offered) | (Side::Buyer, ContractState::None) => None,
         (Side::Buyer, ContractState::Accepted) => Some(fund_contract(escrow)),
+        (_, ContractState::DisputeAccepted)
+        | (_, ContractState::DisputeOffered)
+        | (_, ContractState::InDispute) => Some(dispute_offer(escrow)),
         _ => Some(contract(escrow)),
     };
 
@@ -183,6 +205,61 @@ fn contract(escrow: &Escrow) -> Column<Message> {
             TextEditor::new(escrow.contract_text())
                 .on_action(Message::ContractDetail)
                 .height(250),
+        )
+}
+
+fn dispute_offer(escrow: &Escrow) -> Column<Message> {
+    let (my_amount_label, other_amount_label) = match escrow.side() {
+        Side::Buyer => ("Amount to receive back", "Amount to send"),
+        Side::Seller => (
+            "Amount to receive",
+            // Message::DisputeAmount,
+            "Amount to send back",
+        ),
+        _ => ("", ""),
+    };
+    let my_amount_message = match (escrow.side(), escrow.contract_state()) {
+        (Side::Seller, ContractState::InDispute) => Message::DisputeAmount,
+        _ => Message::Nop,
+    };
+    let address_message = match (escrow.side(), escrow.contract_state()) {
+        (Side::Buyer, ContractState::DisputeOffered) | (Side::Seller, ContractState::InDispute) => {
+            Message::DisputeAddress
+        }
+        (_, _) => Message::Nop,
+    };
+    Column::new()
+        .push(
+            Row::new()
+                .push(Text::new(my_amount_label))
+                .push(Space::with_width(Length::Fill))
+                .push(
+                    TextInput::new("", escrow.my_dispute_amount())
+                        .on_input(my_amount_message)
+                        .width(200.0),
+                ),
+        )
+        .push(Space::with_height(30.0))
+        .push(
+            Row::new()
+                .push(Text::new("Address"))
+                .push(Space::with_width(Length::Fill))
+                .push(
+                    TextInput::new("", escrow.dispute_address())
+                        .on_input(address_message)
+                        .width(200.0),
+                ),
+        )
+        .push(Space::with_height(30.0))
+        .push(
+            Row::new()
+                .push(Text::new(other_amount_label))
+                .push(Space::with_width(Length::Fill))
+                .push(
+                    TextInput::new("", escrow.peer_dispute_amount())
+                        .on_input(Message::Nop)
+                        .width(200.0),
+                ),
         )
 }
 
