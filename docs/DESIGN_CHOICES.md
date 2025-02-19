@@ -24,6 +24,7 @@ The contract is the data representing the terms of a deal to be executed, includ
  - Anything that can be represented as string(s) or byte(s).
 
 ## Motivation
+
 Traditional escrow services rely on centralized third parties. By using Bitcoin's scripting capabilities, 
 especially Miniscript and Taproot, this solution ensures self-custody and trustless transactions, eliminating 
 the need for intermediaries.
@@ -46,26 +47,26 @@ The contract lifetime is composed of several steps:
 
 The contract lifetime can be represented by this chart: 
 
- 
-┌───────────┐        ┌───────────┐
+```
+        ┌───────────┐        ┌───────────┐
         │  Offered  │◄───────│  Refused  │
         └───────────┘        └───────────┘
-          │       │                 ▲  
+          │        │                  ▲
      buyer accepts └─ buyer refuses ──┘
-          │                          
+          │
           ▼
         ┌───────────┐
         │ Accepted  │
         └───────────┘
               │
-  buyer broadcasts funding tx        
+  buyer broadcasts funding tx
               │
               ▼
         ┌───────────┐
         │  Funded   │
         └───────────┘
               │
- utxo reaches <target> confirmations           
+ utxo reaches <target> confirmations
               │
               ▼
         ┌───────────┐
@@ -76,7 +77,7 @@ The contract lifetime can be represented by this chart:
               │
               ├───────────────┐
               │               │
-          agreement     no agreement                
+          agreement     no agreement
               │               │
               ▼               ▼
         ┌───────────┐   ┌────────────┐
@@ -89,7 +90,7 @@ The contract lifetime can be represented by this chart:
                               ▼                        ▼
                         timelock elapse           3rd party takes
                                                       action
-
+```
 
 ## Identities
 
@@ -108,7 +109,7 @@ we should switch in the future to NIP17 "Private Direct Messages".
 For privacy & security reasons, we should not produce contracts with duplicate signing keys. Some signing devices 
 have known limitations in their design, such as a maximum derivation depth of 8.
 
- - BIP388 restricts the XPub derivation path to <multipath>/* (depth of 2).
+ - BIP388 restricts the XPub derivation path to `<multipath>/*` (depth of 2).
  - Our contract hash is a 32-byte array ([u8:32]) that we can convert into an 8 u32 array ([u32;8]).
  - Given this context, we opt for an XPub origin derivation path of depth 6 + a depth 2 for the XPub derivation path.
  - Contracts typically produce a single receive address, so static child numbers are used instead of multipaths and wildcards.
@@ -121,6 +122,8 @@ Non-hardened derivation paths are used to maintain compatibility with hardware s
 for an unhardened derivation path is 2^31-1, meaning each byte from the contract hash provides 7 bits of entropy.
 
 ## Contract fields
+
+```
 |------------------|-------------------|-------------------------------------------------------------------|
 |       Field      |        Type       | Description                                                       |
 |:----------------:|:-----------------:|:------------------------------------------------------------------|
@@ -128,14 +131,15 @@ for an unhardened derivation path is 2^31-1, meaning each byte from the contract
 |------------------|-------------------|-------------------------------------------------------------------|
 |        id        |      [u8;32]      | The contract ID is a sha256 hash of the contract datastructure    |
 |------------------|-------------------|-------------------------------------------------------------------|
-|  contract_state  |         u8        | The contract's current state:                                      |
+|  contract_state  |         u8        | The contract's current state:                                     |
 |                  |                   | - Empty                                                           |
 |                  |                   | - Offered (seller pre-fills and signs this state)                 |
 |                  |                   | - Accepted (buyer fills and signs this state)                     |
-|                  |                   | - Refused (buyer updates and signs contract if he asks for changes) |
-|                  |                   | - Funded (Unconfirmed payment)                                     |
+|                  |                   | - Refused (buyer updates and signs contract if he asks for        |
+|                  |                   |   changes)                                                        |
+|                  |                   | - Funded (Unconfirmed payment)                                    |
 |                  |                   | - Locked (Confirmed payment)                                      |
-|                  |                   | - Unlocked (Buyer shares hash with seller)                         |
+|                  |                   | - Unlocked (Buyer shares hash with seller)                        |
 |------------------|-------------------|-------------------------------------------------------------------|
 |   contract_type  |         u8        | The contract can be of several kinds:                             |
 |                  |                   | - Peer to peer                                                    |
@@ -156,17 +160,21 @@ for an unhardened derivation path is 2^31-1, meaning each byte from the contract
 |------------------|-------------------|-------------------------------------------------------------------|
 |      seller      |      pub_key      | Seller (Nostr) public key                                         |
 |------------------|-------------------|-------------------------------------------------------------------|
-|   third_parties  | [(pub_key, xpub)] | A list of third parties that can interact as escrow(s) in case of dispute. (optional) |
+|   third_parties  | [(pub_key, xpub)] | A list of third parties that can interact as escrow(s) in case of |
+|                  |                   | dispute. (optional)                                               |
 |------------------|-------------------|-------------------------------------------------------------------|
 |  buyer_signature |                   | See [buyer signature details](#buyer-signature)                   |
 |------------------|-------------------|-------------------------------------------------------------------|
 | seller_signature |                   | See [seller signature details](#seller-signature)                 |
 |------------------|-------------------|-------------------------------------------------------------------|
-|  contract_policy |                   | The Miniscript policy representing the contract spending conditions, see [policy section](#contract-policy) |
+|  contract_policy |                   | The Miniscript policy representing the contract spending          |
+|                  |                   | conditions, see [policy section](#contract-policy)                |
 |------------------|-------------------|-------------------------------------------------------------------|
-
+```
 
 ## Communication Flow in case both parties agree on contract issue:
+
+```
 Seller                                                Buyer               Bitcoin Network
     |                                                     |                       |
     |   Pre-fill contract                                 |                       |
@@ -180,7 +188,7 @@ Seller                                                Buyer               Bitcoi
     | <--------------- Accept contract ------------------ |                       |
     |                                                     |                       |
     |                                                     | ---- Lock funds ----> |
-    |                                                     |    (on-chain tx)     |
+    |                                                     |    (on-chain tx)      |
     |                                                     |                       |
     |                                                     |                       |
     |            /* contract execution */                 |                       |
@@ -192,14 +200,15 @@ Seller                                                Buyer               Bitcoi
     |                                                     |                       |
     | ----------------------------- Spend funds --------------------------------> |
     |                                                          (on-chain tx)      |
-
-
+```
 ## Contract Signatures
 
 Some contract steps have to be signed by either one or both main parties (buyer/seller). By signing, we mean signing a hash 
 of the contract state. As the contract state evolves, not all fields are hashed at all times; they have to be chosen depending on the state:
 
 ### Offered:
+
+```
 h = sha256(
   state |
   contract_type |
@@ -211,9 +220,11 @@ h = sha256(
   seller_pubkey |
   (third_parties)
 )
+```
 
 ### Accepted:
 
+```
 h = sha256(
   state |
   contract_type |
@@ -229,6 +240,7 @@ h = sha256(
   address|
   (third_parties)
 )
+```
 
 ## Spending policy
 
@@ -240,7 +252,7 @@ and some optional paths.
 The principal spending path, the one which an agreement issue of the contract execution should
 end with, is a hashlock path of type:
 
-and(pk(seller), sha256(buyer_hash))
+`and(pk(seller), sha256(buyer_hash))`
 
 buyer_hash is the sha256 hash of a preimage, where the preimage is the buyer's identity private key tweaked 
 by the contract hash at the 'Accepted' state. The buyer communicates the preimage after agreement on the contract's
@@ -255,7 +267,7 @@ to NOT spend the coins before the timelock has elapsed, else the buyer can perfo
 
 The refund spending path is a path of type:
 
-and(pk(seller), pk(buyer))
+`and(pk(seller), pk(buyer))`
 
 This path can be used if both parties agree to a refund to the buyer.
 
@@ -265,20 +277,20 @@ Timelocked paths can be used for 2 main reasons:
  - If the execution of the contract has to be done before a certain date/time, otherwise
    the contract is canceled and the buyer refunded. This path should have a policy of type:
 
-   and(older(relative_timelock), pk(buyer))
+   `and(older(relative_timelock), pk(buyer))`
 
    or 
 
-   and(after(absolute_timelock), pk(buyer))
+   `and(after(absolute_timelock), pk(buyer))`
 
  - Have timelocked 3rd party intervention, the policy could be of type:
    
 
-   and(older(relative_timelock), 3rdparty_policy)
+   `and(older(relative_timelock), 3rdparty_policy)`
 
    or 
 
-   and(after(absolute_timelock), 3rdparty_policy)
+   `and(after(absolute_timelock), 3rdparty_policy)`
 
 ### 4 - 3rd parties policies
 
@@ -287,16 +299,16 @@ Adding a 3rd party to a spending path could be done for 2 reasons:
     and cooperate with them to unlock the stuck contract by cosigning with the 'honest' participant 
     a transaction that resolves the conflict. The policy can be of type:
 
-    thresh(2, pk(seller), pk(buyer), pk(3rd_party))
+    `thresh(2, pk(seller), pk(buyer), pk(3rd_party))`
 
-    This can replace <3rdparty_policy> in a timelocked path, thanks to Miniscript composability.
+    This can replace `3rdparty_policy` in a timelocked path, thanks to Miniscript composability.
 
   - Recovery partner: the 3rd party is in a timelock position to replace one of the participants, in case of
     lost keys. For instance, the policy can be of type:
 
-    or(pk(seller), after(absolute_timelock))
+    `or(pk(seller), after(absolute_timelock))`
 
-    and can replace pk(seller) in the mandatory path.
+    and can replace `pk(seller)` in the mandatory path.
 
 ### Advanced scripting
 
